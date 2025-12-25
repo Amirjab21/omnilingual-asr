@@ -53,12 +53,6 @@ def load_llm_asr_300m(
         A tuple of (model, tokenizer).
     """
 
-    checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path}. Update CHECKPOINT_PATH first."
-        )
-
     # Choose sensible defaults
 
     device = torch.device(device)
@@ -76,8 +70,23 @@ def load_llm_asr_300m(
     # Create an uninitialized model instance on CPU.
     model = create_wav2vec2_llama_model(config)
 
-    # Load checkpoint and extract raw state dict.
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Support loading from URL
+    if str(checkpoint_path).startswith("http://") or str(checkpoint_path).startswith("https://"):
+        print(f"Downloading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.hub.load_state_dict_from_url(
+            str(checkpoint_path),
+            map_location=device,
+            check_hash=False
+        )
+    else:
+        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Checkpoint not found: {checkpoint_path}. Update CHECKPOINT_PATH first."
+            )
+        # Load checkpoint and extract raw state dict.
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
     if isinstance(checkpoint, dict):
         state_dict = checkpoint.get("model_state_dict") or checkpoint.get(
             "model"

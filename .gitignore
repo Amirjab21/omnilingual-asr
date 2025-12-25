@@ -75,3 +75,6 @@ dmypy.json
 .prof
 
 wandb
+
+*.pt
+*.parquet

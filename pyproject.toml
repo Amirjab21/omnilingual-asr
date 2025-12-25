@@ -35,6 +35,11 @@ dependencies = [
     "numpy",
     "kenlm",
     "polars>=1.29.0",
+    "datasets>=3.6.0",
+    "librosa>=0.11.0",
+    "wandb>=0.23.1",
+    "evaluate>=0.4.6",
+    "jiwer>=4.0.0",
 ]
 
 [project.optional-dependencies]

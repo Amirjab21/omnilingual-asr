@@ -181,26 +181,104 @@ def load_llm_asr_300m_with_lora(
         dtype=dtype,
     )
 
-    # 2) Inject LoRA exactly as in training
-    lora_config = LoraConfig(
-        r=LORA_R,
-        alpha=LORA_ALPHA,
-        dropout_p=LORA_DROPOUT_P,
-        target_keywords=LORA_TARGET_KEYWORDS,
-    )
+    # 2) Load LoRA checkpoint to get config
+    ckpt = torch.load(lora_checkpoint_path, map_location=device)
+    state_dict = ckpt.get("model_state_dict") or ckpt
+    saved_config = ckpt.get("lora_config")
+
+    if saved_config:
+        lora_config = LoraConfig(**saved_config)
+    else:
+        # Fallback to defaults if config is not in checkpoint
+        lora_config = LoraConfig(
+            r=LORA_R,
+            alpha=LORA_ALPHA,
+            dropout_p=LORA_DROPOUT_P,
+            target_keywords=LORA_TARGET_KEYWORDS,
+        )
+
+    # 3) Inject LoRA exactly as in training
     inject_lora(model, config=lora_config, freeze_base=True)
 
-    # 3) Load LoRA‑finetuned weights
-    ckpt = torch.load(lora_checkpoint_path, map_location="cpu")
-    state_dict = ckpt.get("model_state_dict") or ckpt
-    model.load_state_dict(state_dict, strict=True)  # use strict=False if you save LoRA‑only
+    # 4) Load LoRA-finetuned weights
+    # strict=False allows loading partial state dict (only LoRA params)
+    model.load_state_dict(state_dict, strict=False)
 
     model.eval()
     return model, tokenizer
 
 
-LORA_R = 8
+def extract_lora_adapters(
+    full_checkpoint_path: str | Path,
+    output_path: str | Path,
+    lora_config: LoraConfig | dict | None = None,
+) -> None:
+    """
+    Loads a full model checkpoint (containing base + LoRA weights),
+    extracts the LoRA parameters, and saves them to a new file.
+    
+    If lora_config is provided, it is saved in the checkpoint so 
+    load_llm_asr_300m_with_lora can automatically reconstruct the model.
+    """
+    import os
+    print(f"Loading full checkpoint from {full_checkpoint_path}...")
+    ckpt = torch.load(full_checkpoint_path, map_location="cpu")
+    
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        state_dict = ckpt["model_state_dict"]
+        # Try to preserve existing config if present and not overridden
+        if lora_config is None and "lora_config" in ckpt:
+             lora_config = ckpt["lora_config"]
+    else:
+        state_dict = ckpt
+
+    print("Extracting LoRA parameters...")
+    lora_state_dict = {k: v for k, v in state_dict.items() if "lora_" in k}
+    
+    if len(lora_state_dict) == 0:
+        print("WARNING: No parameters with 'lora_' found in checkpoint!")
+    else:
+        print(f"Found {len(lora_state_dict)} LoRA parameters.")
+
+    save_dict = {
+        "model_state_dict": lora_state_dict
+    }
+    
+    if lora_config is not None:
+        if isinstance(lora_config, LoraConfig):
+             # Convert dataclass to dict
+             save_dict["lora_config"] = {
+                 "r": lora_config.r,
+                 "alpha": lora_config.alpha,
+                 "dropout_p": lora_config.dropout_p,
+                 "target_keywords": lora_config.target_keywords,
+             }
+        else:
+             save_dict["lora_config"] = lora_config
+             
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        
+    print(f"Saving LoRA adapters to {output_path}...")
+    torch.save(save_dict, output_path)
+    print("Done.")
+
+
+LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT_P = 0.1
-LORA_TARGET_KEYWORDS = ("llama_decoder.layers",)
+LORA_TARGET_KEYWORDS = ("llama_decoder.layers","encoder_frontend","encoder","encoder_proj", "final_proj", "lang_embeddings", "text_frontend")
 #USAGE: model, tokenizer = load_llm_asr_300m_with_lora(lora_checkpoint_path, base_checkpoint_path=base_checkpoint_path, device=device, dtype=dtype) 
+
+# if __name__ == "__main__":
+#     extract_lora_adapters(
+#         full_checkpoint_path="lora_all_layers_2025-12-16_10-39-24_finetune-omniASR-llm.pt",
+#         output_path="lora_all_layers_2025-12-16_10-39-24_finetune-omniASR-llm_lora_only.pt",
+#         lora_config=LoraConfig(
+#             r=LORA_R,
+#             alpha=LORA_ALPHA,
+#             dropout_p=LORA_DROPOUT_P,
+#             target_keywords=LORA_TARGET_KEYWORDS,
+#         )
+#     )

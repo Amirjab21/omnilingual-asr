@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Dict, List
 
 import os
-import random
 import torch
 import torchaudio
 import wandb
@@ -34,7 +33,7 @@ MODEL_NAME = "omniASR-LLM-300M"
 # Dataset / audio configs.
 DATASET_NAME = "UBC-NLP/Casablanca"
 DATASET_CONFIG_NAME = "UAE"
-DATASET_CONFIG_NAMES = ["UAE", "Egypt", "Algeria"]  # your configs
+DATASET_CONFIG_NAMES = ["Egypt"]  # your configs
 TARGET_SAMPLING_RATE = 16_000
 
 MAPPING_DIALECT_TO_LANG_CODE = {
@@ -47,7 +46,7 @@ MAPPING_DIALECT_TO_LANG_CODE = {
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT_P = 0.1
-LORA_TARGET_KEYWORDS = ("llama_decoder.layers",)
+LORA_TARGET_KEYWORDS = ("llama_decoder.layers","encoder_frontend","encoder","encoder_proj", "final_proj", "lang_embeddings", "text_frontend")
 
 # Training loop configs.
 TRAIN_SPLIT = "validation"
@@ -77,7 +76,7 @@ WER_METRIC_NAME = "wer"
 # Checkpoint / artifact configs.
 SANITIZED_WANDB_PROJECT = WANDB_PROJECT.replace("/", "_")
 DATE = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-BEST_VAL_LOSS_CHECKPOINT_PATH = f"best_model_valloss_{DATE}_{SANITIZED_WANDB_PROJECT}.pt"
+BEST_VAL_LOSS_CHECKPOINT_PATH = f"lora_all_layers_{DATE}_{SANITIZED_WANDB_PROJECT}.pt"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -200,7 +199,6 @@ class CasablancaOmniASRDataset(TorchDataset):
             ).squeeze(0)
 
         transcription: str = row["transcription"]
-
         lang_code = row["lang_code"]
 
         return {
@@ -285,18 +283,18 @@ def evaluate_loss_only(
     """
     model.eval()
     # Create a decoder once so we can inspect / decode targets during validation.
-    token_decoder = tokenizer.create_decoder(skip_special_tokens=True)
+    # token_decoder = tokenizer.create_decoder(skip_special_tokens=True)
     # Set up a simple beam-search generator if this is the LLM ASR model.
-    beam_search_generator = None
-    if isinstance(model, Wav2Vec2LlamaModel):
-        beam_search_config = Wav2Vec2LlamaBeamSearchConfig(
-            nbest=BEAM_NBEST,
-            length_norm=BEAM_LENGTH_NORM,
-        )
-        beam_search_generator = Wav2Vec2LlamaBeamSearchSeq2SeqGenerator(
-            model=model,
-            config=beam_search_config,
-        )
+    # beam_search_generator = None
+    # if isinstance(model, Wav2Vec2LlamaModel):
+    #     beam_search_config = Wav2Vec2LlamaBeamSearchConfig(
+    #         nbest=BEAM_NBEST,
+    #         length_norm=BEAM_LENGTH_NORM,
+    #     )
+    #     beam_search_generator = Wav2Vec2LlamaBeamSearchSeq2SeqGenerator(
+    #         model=model,
+    #         config=beam_search_config,
+    #     )
 
     total_loss = 0.0
     num_batches = EVAL_MAX_BATCHES
@@ -308,34 +306,34 @@ def evaluate_loss_only(
 
             target_seqs = batch.target_seqs
             loss, logits, decoder_inputs_layout, decoder_context_inputs, decoder_context_layout = model(batch, return_logits=True)
-            if batch_idx < EVAL_LOG_EXAMPLES:
-                # Pick a random example from the batch to decode.
-                batch_size = target_seqs.size(0)
-                rand_idx = torch.randint(
-                    low=0,
-                    high=batch_size,
-                    size=(1,),
-                    device=target_seqs.device,
-                ).item()
+            # if batch_idx < EVAL_LOG_EXAMPLES:
+            #     # Pick a random example from the batch to decode.
+            #     batch_size = target_seqs.size(0)
+            #     rand_idx = torch.randint(
+            #         low=0,
+            #         high=batch_size,
+            #         size=(1,),
+            #         device=target_seqs.device,
+            #     ).item()
 
-                pred_tokens, pred_layout = beam_search_generator.generate_hypotheses(
-                    decoder_context_inputs=decoder_context_inputs,
-                    decoder_context_input_layout=decoder_context_layout,
-                )
+            #     pred_tokens, pred_layout = beam_search_generator.generate_hypotheses(
+            #         decoder_context_inputs=decoder_context_inputs,
+            #         decoder_context_input_layout=decoder_context_layout,
+            #     )
 
-                # Use the recorded sequence lengths to slice out valid tokens.
-                target_len = batch.target_seq_lens[rand_idx]
-                decoded_text = token_decoder(
-                    target_seqs[rand_idx, :target_len]
-                )
+            #     # Use the recorded sequence lengths to slice out valid tokens.
+            #     target_len = batch.target_seq_lens[rand_idx]
+            #     decoded_text = token_decoder(
+            #         target_seqs[rand_idx, :target_len]
+            #     )
 
-                pred_len = int(pred_layout.seq_lens_pt[rand_idx].item())
-                pred_text = token_decoder(
-                    pred_tokens[rand_idx, :pred_len]
-                )
+            #     pred_len = int(pred_layout.seq_lens_pt[rand_idx].item())
+            #     pred_text = token_decoder(
+            #         pred_tokens[rand_idx, :pred_len]
+            #     )
 
-                print(f"    [example {rand_idx}, ] target text (groundtruth transcription): {decoded_text}")
-                print(f"    [example {rand_idx}, ] predicted text (beam search): {pred_text}")
+            #     print(f"    [example {rand_idx}, ] target text (groundtruth transcription): {decoded_text}")
+            #     print(f"    [example {rand_idx}, ] predicted text (beam search): {pred_text}")
             total_loss += float(loss.item())
             num_batches += 1
 
@@ -353,6 +351,7 @@ def save_lora_checkpoint(
 ) -> None:
     """
     Save a LoRA checkpoint when a new best validation loss is observed.
+    Saves only LoRA parameters to save space.
     """
     global lowest_val_loss
 
@@ -369,9 +368,24 @@ def save_lora_checkpoint(
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
 
-    torch.save({"model_state_dict": model.state_dict()}, checkpoint_path_str)
+    # Extract only LoRA parameters
+    lora_state_dict = {k: v for k, v in model.state_dict().items() if "lora_" in k}
+    
+    # Save config so we can reconstruct the same architecture
+    lora_config_dict = {
+        "r": LORA_R,
+        "alpha": LORA_ALPHA,
+        "dropout_p": LORA_DROPOUT_P,
+        "target_keywords": LORA_TARGET_KEYWORDS,
+    }
+
+    torch.save({
+        "model_state_dict": lora_state_dict,
+        "lora_config": lora_config_dict
+    }, checkpoint_path_str)
+    
     print(
-        f"New best val_loss {avg_val_loss:.4f}; model saved to {checkpoint_path_str}"
+        f"New best val_loss {avg_val_loss:.4f}; LoRA adapters saved to {checkpoint_path_str}"
     )
 
 if __name__ == "__main__":

@@ -73,8 +73,3 @@ dmypy.json
 
 # Profiling
 .prof
-
-wandb
-
-*.pt
-*.parquet
